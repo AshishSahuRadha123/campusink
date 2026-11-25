@@ -20,6 +20,9 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 5000;
 
 // Serve uploaded PDF & Excel files publicly for Admin to view/print
+app.get('/', (req, res) => {
+  res.json({ status: 'OK', service: 'CampusInk Backend API' });
+});
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.use('/api/auth', authRoutes);
