@@ -324,12 +324,21 @@ router.patch('/:id/status', protect, adminOnly, async (req, res) => {
   }
 });
 
-// Admin: Delete Print Order & Uploaded File
-router.delete('/:id', protect, adminOnly, async (req, res) => {
+// Delete Print Order (Admin can delete any order; Customer can delete own order) & Uploaded File
+router.delete('/:id', protect, async (req, res) => {
   try {
     const order = await PrintOrder.findById(req.params.id);
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
+    }
+
+    const isAdmin = String(req.user?.role || '').toLowerCase() === 'admin';
+    const currentUserId = String(req.user?._id || req.user?.id || '');
+    const orderOwnerId = String(order.customer?._id || order.customer || '');
+    const isOwner = Boolean(currentUserId && orderOwnerId && currentUserId === orderOwnerId);
+
+    if (!isAdmin && !isOwner) {
+      return res.status(403).json({ message: 'Access denied: you can only delete your own order' });
     }
 
     if (order.fileUrl) {
