@@ -360,5 +360,56 @@ router.delete('/:id', protect, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+// Update Print Order details (Admin can update any order; Customer can update own order)
+router.patch('/:id', protect, async (req, res) => {
+  try {
+    const order = await PrintOrder.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    const isAdmin = String(req.user?.role || '').toLowerCase() === 'admin';
+    const currentUserId = String(req.user?._id || req.user?.id || '');
+    const orderOwnerId = String(order.customer?._id || order.customer || '');
+    const isOwner = Boolean(currentUserId && orderOwnerId && currentUserId === orderOwnerId);
+
+    if (!isAdmin && !isOwner) {
+      return res.status(403).json({ message: 'Access denied: you can only update your own order' });
+    }
+
+    const { documentName, pages, copies, printType, sides } = req.body;
+
+    if (documentName !== undefined && String(documentName).trim()) {
+      order.documentName = String(documentName).trim();
+    }
+    if (pages !== undefined) {
+      order.pages = Math.max(1, Number(pages) || 1);
+    }
+    if (copies !== undefined) {
+      order.copies = Math.max(1, Number(copies) || 1);
+    }
+    if (printType !== undefined) {
+      order.printType = printType === 'Color' ? 'Color' : 'B&W';
+    }
+    if (sides !== undefined) {
+      order.sides = sides === 'Double' ? 'Double' : 'Single';
+    }
+
+    // Recalculate payable price if not completed
+    if (order.status !== 'Completed') {
+      const totalBillablePages = order.pages * order.copies;
+      const freePagesUsed = Math.min(Number(order.freePagesUsed) || 0, totalBillablePages);
+      const payablePages = Math.max(0, totalBillablePages - freePagesUsed);
+      const ratePerPage = order.printType === 'Color' ? 5 : 1;
+      const bindingCharge = order.binding === 'Spiral' ? 25 : order.binding === 'Hard' ? 60 : 0;
+      order.totalPrice = payablePages * ratePerPage + bindingCharge;
+    }
+
+    await order.save();
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
 
 module.exports = router;
