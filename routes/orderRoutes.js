@@ -57,7 +57,12 @@ router.post('/', protect, upload.single('documentFile'), async (req, res) => {
       selectedRewardId,
       customerName,
       phone,
-      totalPrice: bodyTotalPrice
+      totalPrice: bodyTotalPrice,
+      deliveryType,
+      deliveryAddress,
+      deliveryCharge,
+      dropLocation,
+      riderPhone
     } = req.body;
 
     const numPages = Math.max(1, Number(pages) || 1);
@@ -65,6 +70,22 @@ router.post('/', protect, upload.single('documentFile'), async (req, res) => {
     const cleanPrintType = printType === 'Color' ? 'Color' : 'B&W';
     const cleanSides = sides === 'Double' ? 'Double' : 'Single';
     const cleanBinding = ['Spiral', 'Hard'].includes(binding) ? binding : 'None';
+    const cleanDeliveryType = deliveryType === 'Delivery' ? 'Delivery' : 'Pickup';
+    const cleanDeliveryCharge = cleanDeliveryType === 'Delivery'
+      ? Math.max(0, Number(deliveryCharge) || 15)
+      : 0;
+
+    let parsedDropLocation = { lat: 19.0664, lng: 72.8265 };
+    if (dropLocation) {
+      try {
+        const rawDrop = typeof dropLocation === 'string' ? JSON.parse(dropLocation) : dropLocation;
+        if (rawDrop && Number.isFinite(Number(rawDrop.lat)) && Number.isFinite(Number(rawDrop.lng))) {
+          parsedDropLocation = { lat: Number(rawDrop.lat), lng: Number(rawDrop.lng) };
+        }
+      } catch {
+        // fallback to default campus coordinates
+      }
+    }
 
     let targetCustomerId = req.user.id;
 
@@ -118,7 +139,7 @@ router.post('/', protect, upload.single('documentFile'), async (req, res) => {
     const payablePages = Math.max(0, totalBillablePages - freePagesUsed);
     const ratePerPage = cleanPrintType === 'Color' ? 5 : 1;
     const bindingCharge = cleanBinding === 'Spiral' ? 25 : cleanBinding === 'Hard' ? 60 : 0;
-    const calculatedPrice = payablePages * ratePerPage + bindingCharge;
+    const calculatedPrice = payablePages * ratePerPage + bindingCharge + cleanDeliveryCharge;
     const finalPrice =
       req.user.role === 'admin' && bodyTotalPrice !== undefined && !Number.isNaN(Number(bodyTotalPrice))
         ? Number(bodyTotalPrice)
@@ -141,7 +162,12 @@ router.post('/', protect, upload.single('documentFile'), async (req, res) => {
       notes: notes || '',
       paymentMode: ['Cash', 'Due'].includes(paymentMode) ? paymentMode : 'UPI',
       freePagesUsed,
-      totalPrice: finalPrice
+      totalPrice: finalPrice,
+      deliveryType: cleanDeliveryType,
+      deliveryAddress: cleanDeliveryType === 'Delivery' ? String(deliveryAddress || '').trim() : '',
+      deliveryCharge: cleanDeliveryCharge,
+      dropLocation: parsedDropLocation,
+      riderPhone: riderPhone || ''
     });
 
     res.status(201).json(order);
@@ -187,7 +213,7 @@ router.post('/import-csv', protect, adminOnly, upload.single('file'), async (req
         sides,
         freePagesUsed: Number(row['free pages used'] || row['freepagesused'] || 0) || 0,
         totalPrice: computedAmount,
-        status: ['Pending', 'Printing', 'Ready for Pickup', 'Completed'].includes(row['status'])
+        status: ['Pending', 'Printing', 'Ready for Pickup', 'Out for Delivery', 'Completed'].includes(row['status'])
           ? row['status']
           : 'Pending'
       });
@@ -238,84 +264,99 @@ router.get('/rewards-ledger', protect, adminOnly, async (req, res) => {
   }
 });
 
+// Admin: Update Order Status (Including 'Out for Delivery' + Live Socket Event)
 router.patch('/:id/status', protect, adminOnly, async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, riderPhone } = req.body;
     const order = await PrintOrder.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
     const wasAlreadyCompleted = order.status === 'Completed';
     order.status = status;
+    if (riderPhone !== undefined) {
+      order.riderPhone = String(riderPhone).trim();
+    }
     await order.save();
+
+    // Real-time status broadcast to tracking room
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`order_${order._id}`).emit('orderStatusUpdated', {
+        orderId: order._id,
+        status: order.status
+      });
+    }
 
     if (status === 'Completed' && !wasAlreadyCompleted) {
       const student = await User.findById(order.customer);
-      const totalOrderPages = order.pages * order.copies;
+      if (student) {
+        const totalOrderPages = order.pages * order.copies;
 
-      if (totalOrderPages >= 100) {
-        student.rewards.push({
-          freePages: 15,
-          reason: '100+ Pages Print Milestone',
-          minPaidPages: 20,
-          expiryDate: addDays(20),
-          status: 'Active'
-        });
-      } else if (totalOrderPages >= 50) {
-        student.rewards.push({
-          freePages: 5,
-          reason: '50+ Pages Print Milestone',
-          minPaidPages: 10,
-          expiryDate: addDays(15),
-          status: 'Active'
-        });
-      }
-
-      student.completedOrdersCount += 1;
-      if (student.completedOrdersCount % 5 === 0) {
-        student.rewards.push({
-          freePages: 20,
-          reason: `5th Order Stamp Card Bonus (#${student.completedOrdersCount})`,
-          minPaidPages: 10,
-          expiryDate: addDays(30),
-          status: 'Active'
-        });
-      }
-
-      if (student.referredBy && !student.referralRewardClaimed && totalOrderPages >= 25) {
-        const referrer = await User.findOne({ referralCode: student.referredBy });
-        if (referrer) {
-          student.referralRewardClaimed = true;
-          referrer.rewards.push({
-            freePages: 10,
-            reason: `Referred ${student.name}`,
+        if (totalOrderPages >= 100) {
+          student.rewards.push({
+            freePages: 15,
+            reason: '100+ Pages Print Milestone',
+            minPaidPages: 20,
+            expiryDate: addDays(20),
+            status: 'Active'
+          });
+        } else if (totalOrderPages >= 50) {
+          student.rewards.push({
+            freePages: 5,
+            reason: '50+ Pages Print Milestone',
             minPaidPages: 10,
             expiryDate: addDays(15),
             status: 'Active'
           });
+        }
 
-          const currentMonth = new Date().toISOString().slice(0, 7);
-          if (referrer.lastReferralMonth === currentMonth) {
-            referrer.monthlyReferrals += 1;
-          } else {
-            referrer.lastReferralMonth = currentMonth;
-            referrer.monthlyReferrals = 1;
-          }
+        student.completedOrdersCount += 1;
+        if (student.completedOrdersCount % 5 === 0) {
+          student.rewards.push({
+            freePages: 20,
+            reason: `5th Order Stamp Card Bonus (#${student.completedOrdersCount})`,
+            minPaidPages: 10,
+            expiryDate: addDays(30),
+            status: 'Active'
+          });
+        }
 
-          if (referrer.monthlyReferrals === 3) {
+        if (student.referredBy && !student.referralRewardClaimed && totalOrderPages >= 25) {
+          const referrer = await User.findOne({ referralCode: student.referredBy });
+          if (referrer) {
+            student.referralRewardClaimed = true;
             referrer.rewards.push({
-              freePages: 30,
-              reason: 'Super Referrer Bonus (3 Friends in 1 Month)',
+              freePages: 10,
+              reason: `Referred ${student.name}`,
               minPaidPages: 10,
-              expiryDate: addDays(30),
+              expiryDate: addDays(15),
               status: 'Active'
             });
+
+            const currentMonth = new Date().toISOString().slice(0, 7);
+            if (referrer.lastReferralMonth === currentMonth) {
+              referrer.monthlyReferrals += 1;
+            } else {
+              referrer.lastReferralMonth = currentMonth;
+              referrer.monthlyReferrals = 1;
+            }
+
+            if (referrer.monthlyReferrals === 3) {
+              referrer.rewards.push({
+                freePages: 30,
+                reason: 'Super Referrer Bonus (3 Friends in 1 Month)',
+                minPaidPages: 10,
+                expiryDate: addDays(30),
+                status: 'Active'
+              });
+            }
+
+            await referrer.save();
           }
-
-          await referrer.save();
         }
-      }
 
-      await student.save();
+        await student.save();
+      }
     }
 
     res.json(order);
@@ -360,6 +401,7 @@ router.delete('/:id', protect, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
 // Update Print Order details (Admin can update any order; Customer can update own order)
 router.patch('/:id', protect, async (req, res) => {
   try {
@@ -377,7 +419,7 @@ router.patch('/:id', protect, async (req, res) => {
       return res.status(403).json({ message: 'Access denied: you can only update your own order' });
     }
 
-    const { documentName, pages, copies, printType, sides } = req.body;
+    const { documentName, pages, copies, printType, sides, notes, deliveryType, deliveryAddress } = req.body;
 
     if (documentName !== undefined && String(documentName).trim()) {
       order.documentName = String(documentName).trim();
@@ -394,6 +436,16 @@ router.patch('/:id', protect, async (req, res) => {
     if (sides !== undefined) {
       order.sides = sides === 'Double' ? 'Double' : 'Single';
     }
+    if (notes !== undefined) {
+      order.notes = String(notes).trim();
+    }
+    if (deliveryType !== undefined) {
+      order.deliveryType = deliveryType === 'Delivery' ? 'Delivery' : 'Pickup';
+      order.deliveryCharge = order.deliveryType === 'Delivery' ? 15 : 0;
+    }
+    if (deliveryAddress !== undefined) {
+      order.deliveryAddress = String(deliveryAddress).trim();
+    }
 
     // Recalculate payable price if not completed
     if (order.status !== 'Completed') {
@@ -402,7 +454,7 @@ router.patch('/:id', protect, async (req, res) => {
       const payablePages = Math.max(0, totalBillablePages - freePagesUsed);
       const ratePerPage = order.printType === 'Color' ? 5 : 1;
       const bindingCharge = order.binding === 'Spiral' ? 25 : order.binding === 'Hard' ? 60 : 0;
-      order.totalPrice = payablePages * ratePerPage + bindingCharge;
+      order.totalPrice = payablePages * ratePerPage + bindingCharge + (order.deliveryCharge || 0);
     }
 
     await order.save();
