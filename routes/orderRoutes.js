@@ -14,7 +14,7 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Multer Storage & File Filter (PDF & Excel only)
+// Multer Storage & File Filter (PDF, CSV & Excel only)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
@@ -103,8 +103,9 @@ router.post('/', protect, upload.single('documentFile'), async (req, res) => {
       }
     }
 
+    const baseUrl = `${req.headers['x-forwarded-proto'] || req.protocol}://${req.get('host')}`;
     const fileUrl = req.file
-      ? `https://sealed-bald-buys-signing.trycloudflare.com/uploads/${req.file.filename}`
+      ? `${baseUrl}/uploads/${req.file.filename}`
       : (bodyFileUrl || '');
 
     if (!req.file && !documentName) {
